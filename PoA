@@ -1,0 +1,579 @@
+-- ═══════════════════════════════════════════
+--  SERVICES
+-- ═══════════════════════════════════════════
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ═══════════════════════════════════════════
+--  LOAD UI LIBRARY
+-- ═══════════════════════════════════════════
+local library = loadstring(
+    game:HttpGet("https://raw.githubusercontent.com/georgelepsink-afk/zovUI/refs/heads/main/zov.luau")
+)()
+
+-- ═══════════════════════════════════════════
+--  SETTINGS (изменяются через UI)
+-- ═══════════════════════════════════════════
+local S = {
+    -- General
+    enabled         = true,
+    parryKey        = Enum.KeyCode.F,
+
+    -- Parry physics
+    parryStrength   = 120,     -- сила броска вверх
+    headCheckDist   = 3.5,     -- дальность рейкаста над головой (studs)
+    freezeDuration  = 0.12,    -- время заморозки персонажа (сек)
+    ragdollDuration = 2.0,     -- длительность регдола (сек)
+
+    -- Flash
+    flashEnabled    = true,
+    flashOpacity    = 0.55,    -- 0 = прозрачный, 1 = полностью белый
+    flashDuration   = 0.35,    -- скорость fade-out (сек)
+
+    -- Sound toggles
+    soundParry      = true,
+    soundFall       = true,
+    soundLand       = true,
+
+    -- Sound volumes
+    vol_parry1      = 1.0,
+    vol_parry2      = 0.8,
+    vol_fall        = 0.7,
+    vol_land        = 1.0,
+}
+
+-- ═══════════════════════════════════════════
+--  STATE
+-- ═══════════════════════════════════════════
+local parryDebounce   = false
+local isFalling       = false
+local fallSoundActive = false
+local ragdollData     = {}   -- хранит созданные при регдоле объекты
+
+-- ═══════════════════════════════════════════
+--  WHITE FLASH OVERLAY
+-- ═══════════════════════════════════════════
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name            = "PoA_Overlay"
+screenGui.ResetOnSpawn    = false
+screenGui.IgnoreGuiInset  = true
+screenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+screenGui.Parent          = LocalPlayer:WaitForChild("PlayerGui")
+
+local flashFrame = Instance.new("Frame")
+flashFrame.Name                 = "WhiteFlash"
+flashFrame.Size                 = UDim2.new(1, 0, 1, 0)
+flashFrame.BackgroundColor3     = Color3.fromRGB(255, 255, 255)
+flashFrame.BackgroundTransparency = 1
+flashFrame.BorderSizePixel      = 0
+flashFrame.ZIndex               = 100
+flashFrame.Parent               = screenGui
+
+-- ═══════════════════════════════════════════
+--  SOUNDS
+-- ═══════════════════════════════════════════
+local function makeSound(id, vol, looped)
+    local s = Instance.new("Sound")
+    s.SoundId  = "rbxassetid://" .. tostring(id)
+    s.Volume   = vol
+    s.Looped   = looped or false
+    s.RollOffMaxDistance = 0
+    s.Parent   = LocalPlayer:WaitForChild("PlayerGui")
+    return s
+end
+
+local snd_parry1 = makeSound(8820780818,        1.0, false)
+local snd_parry2 = makeSound(126642087525012,   0.8, false)
+local snd_fall   = makeSound(139819985850537,   0.7, true )
+local snd_land   = makeSound(139270438752699,   1.0, false)
+
+-- ═══════════════════════════════════════════
+--  HELPER FUNCTIONS
+-- ═══════════════════════════════════════════
+local function getChar()
+    return LocalPlayer.Character
+end
+
+local function getHRP(char)
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHum(char)
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+
+local function getHead(char)
+    return char and char:FindFirstChild("Head")
+end
+
+-- Рейкаст вверх от головы → true если над головой объект
+local function isObjectAboveHead()
+    local char = getChar()
+    local head = getHead(char)
+    if not head then return false end
+
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = {char}
+    params.FilterType = Enum.RaycastFilterType.Exclude
+
+    local result = Workspace:Raycast(
+        head.Position,
+        Vector3.new(0, S.headCheckDist, 0),
+        params
+    )
+    return result ~= nil
+end
+
+-- Белый фейдаут
+local function doFlash()
+    if not S.flashEnabled then return end
+    flashFrame.BackgroundTransparency = 1 - S.flashOpacity
+    TweenService:Create(
+        flashFrame,
+        TweenInfo.new(S.flashDuration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+        { BackgroundTransparency = 1 }
+    ):Play()
+end
+
+-- Заморозить персонажа на duration секунд
+local function freezeChar(char, duration)
+    local hrp = getHRP(char)
+    local hum = getHum(char)
+    if not hrp then return end
+
+    local prevSpeed = hum and hum.WalkSpeed or 16
+    hrp.Anchored = true
+    if hum then hum.WalkSpeed = 0 end
+
+    task.delay(duration, function()
+        if hrp and hrp.Parent then
+            hrp.Anchored = false
+        end
+        if hum and hum.Parent then
+            hum.WalkSpeed = prevSpeed
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════
+--  RAGDOLL  (только локально)
+-- ═══════════════════════════════════════════
+local function enableRagdoll(char)
+    local hum = getHum(char)
+    if not hum then return end
+    hum.PlatformStand = true
+
+    ragdollData = {}
+
+    for _, motor in ipairs(char:GetDescendants()) do
+        if motor:IsA("Motor6D") and motor.Part0 and motor.Part1 then
+            motor.Enabled = false
+
+            local socket = Instance.new("BallSocketConstraint")
+            local a0     = Instance.new("Attachment")
+            local a1     = Instance.new("Attachment")
+
+            -- Позиции аттачментов совпадают с позицией джойнта
+            a0.CFrame = motor.C0
+            a1.CFrame = motor.C1
+            a0.Parent = motor.Part0
+            a1.Parent = motor.Part1
+
+            socket.Attachment0 = a0
+            socket.Attachment1 = a1
+            socket.Parent       = motor.Part0
+
+            table.insert(ragdollData, {
+                socket = socket,
+                a0     = a0,
+                a1     = a1,
+                motor  = motor,
+            })
+        end
+    end
+end
+
+local function disableRagdoll(char)
+    local hum = getHum(char)
+    if hum and hum.Parent then
+        hum.PlatformStand = false
+    end
+
+    for _, d in ipairs(ragdollData) do
+        if d.socket and d.socket.Parent then d.socket:Destroy() end
+        if d.a0     and d.a0.Parent     then d.a0:Destroy()     end
+        if d.a1     and d.a1.Parent     then d.a1:Destroy()     end
+        if d.motor  and d.motor.Parent  then d.motor.Enabled = true end
+    end
+    ragdollData = {}
+end
+
+-- ═══════════════════════════════════════════
+--  MAIN PARRY LOGIC
+-- ═══════════════════════════════════════════
+local function doParry()
+    if not S.enabled      then return end
+    if parryDebounce      then return end
+
+    local char = getChar()
+    local hrp  = getHRP(char)
+    if not char or not hrp then return end
+
+    -- Главная проверка: есть ли что-то над головой?
+    if not isObjectAboveHead() then return end
+
+    parryDebounce = true
+
+    -- Шаг 1: Флеш + заморозка
+    doFlash()
+    freezeChar(char, S.freezeDuration)
+
+    -- Шаг 2: Звук парирования 1
+    if S.soundParry then
+        snd_parry1.Volume = S.vol_parry1
+        snd_parry1:Play()
+    end
+
+    task.wait(S.freezeDuration)
+
+    -- Шаг 3: Звук парирования 2 + регдол + бросок вверх
+    if S.soundParry then
+        snd_parry2.Volume = S.vol_parry2
+        snd_parry2:Play()
+    end
+
+    enableRagdoll(char)
+
+    -- Горизонтальная скорость сохраняется, вертикальная — форсируется вверх
+    local curVel = hrp.AssemblyLinearVelocity
+    hrp.AssemblyLinearVelocity = Vector3.new(curVel.X, S.parryStrength, curVel.Z)
+
+    -- Шаг 4: Через ragdollDuration — восстановиться
+    task.delay(S.ragdollDuration, function()
+        local c = getChar()
+        if c then disableRagdoll(c) end
+        parryDebounce = false
+    end)
+end
+
+-- ═══════════════════════════════════════════
+--  INPUT
+-- ═══════════════════════════════════════════
+UserInputService.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if input.KeyCode == S.parryKey then
+        doParry()
+    end
+end)
+
+-- ═══════════════════════════════════════════
+--  FALL / LAND DETECTION  (Heartbeat)
+-- ═══════════════════════════════════════════
+RunService.Heartbeat:Connect(function()
+    local char = getChar()
+    if not char then return end
+    local hrp = getHRP(char)
+    local hum = getHum(char)
+    if not hrp or not hum then return end
+
+    local velY     = hrp.AssemblyLinearVelocity.Y
+    local onGround = hum.FloorMaterial ~= Enum.Material.Air
+
+    -- Детект падения (скорость вниз > порога)
+    local isNowFalling = velY < -8 and not onGround
+
+    if isNowFalling and not fallSoundActive then
+        if S.soundFall then
+            snd_fall.Volume = S.vol_fall
+            snd_fall:Play()
+        end
+        fallSoundActive = true
+        isFalling       = true
+
+    elseif not isNowFalling and fallSoundActive then
+        snd_fall:Stop()
+        fallSoundActive = false
+    end
+
+    -- Детект приземления
+    if isFalling and onGround then
+        isFalling = false
+        if S.soundLand then
+            snd_land.Volume = S.vol_land
+            snd_land:Play()
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════
+--  UI  —  ZovUI
+-- ═══════════════════════════════════════════
+local window = library:new({
+    name      = "parryOnAnything  —  PoA",
+    textsize  = 12,
+    font      = "RobotoMono",
+    color     = Color3.fromRGB(100, 200, 255),
+    width     = 450,
+    height    = 500,
+})
+
+-- INS закрывает / открывает UI
+window:setkey(Enum.KeyCode.Insert)
+
+-- Watermark
+local wm = window:watermark()
+wm:update({ ["PoA | ITS THAT MINOS PRIME?!"] = "v1.0", ["Key"] = "F" })
+wm:updateside("topright")
+wm:toggle(true)
+
+-- ────────────────────────────────────────────
+--  PAGE 1 — PARRY
+-- ────────────────────────────────────────────
+local pageParry = window:page({ name = "Parry", pointer = "parry" })
+
+local secLeft = pageParry:section({
+    name    = "Main Settings",
+    side    = "left",
+    size    = 235,
+    pointer = "main_l",
+})
+
+local secRight = pageParry:section({
+    name    = "Physics",
+    side    = "right",
+    size    = 215,
+    pointer = "main_r",
+})
+
+-- Enabled
+secLeft:toggle({
+    name     = "Enabled",
+    default  = true,
+    pointer  = "enabled",
+    callback = function(v) S.enabled = v end,
+})
+
+-- Parry keybind
+secLeft:keybind({
+    name     = "Parry Key",
+    default  = Enum.KeyCode.F,
+    pointer  = "parrykey",
+    callback = function(key)
+        S.parryKey = key
+        wm:update({ ["PoA"] = "v1.0", ["Key"] = key.Name })
+    end,
+})
+
+-- Head check distance
+secLeft:slider({
+    name     = "Head Check Distance",
+    min      = 0.5,
+    max      = 10,
+    default  = 3.5,
+    decimal  = 0.5,
+    pointer  = "headcheck",
+    callback = function(v) S.headCheckDist = v end,
+})
+
+-- Freeze duration
+secLeft:slider({
+    name     = "Freeze Duration",
+    min      = 0,
+    max      = 0.5,
+    default  = 0.12,
+    decimal  = 0.01,
+    pointer  = "freezedur",
+    callback = function(v) S.freezeDuration = v end,
+})
+
+-- Parry strength
+secRight:slider({
+    name     = "Parry Strength",
+    min      = 10,
+    max      = 2000,
+    default  = 120,
+    decimal  = 5,
+    pointer  = "strength",
+    callback = function(v) S.parryStrength = v end,
+})
+
+-- Ragdoll duration
+secRight:slider({
+    name     = "Ragdoll Duration",
+    min      = 0.3,
+    max      = 8,
+    default  = 2.0,
+    decimal  = 0.1,
+    pointer  = "ragdolldur",
+    callback = function(v) S.ragdollDuration = v end,
+})
+
+-- Test button
+secRight:button({
+    name     = "Force Parry (no check)",
+    callback = function()
+        -- принудительно сработать без проверки потолка (для теста)
+        local char = getChar()
+        local hrp  = getHRP(char)
+        if not char or not hrp then return end
+        if parryDebounce then return end
+        parryDebounce = true
+        doFlash()
+        if S.soundParry then snd_parry1.Volume = S.vol_parry1; snd_parry1:Play() end
+        freezeChar(char, S.freezeDuration)
+        task.wait(S.freezeDuration)
+        if S.soundParry then snd_parry2.Volume = S.vol_parry2; snd_parry2:Play() end
+        enableRagdoll(char)
+        local cv = hrp.AssemblyLinearVelocity
+        hrp.AssemblyLinearVelocity = Vector3.new(cv.X, S.parryStrength, cv.Z)
+        task.delay(S.ragdollDuration, function()
+            local c = getChar(); if c then disableRagdoll(c) end
+            parryDebounce = false
+        end)
+    end,
+})
+
+-- ────────────────────────────────────────────
+--  PAGE 2 — VISUALS
+-- ────────────────────────────────────────────
+local pageVis = window:page({ name = "Visuals", pointer = "visuals" })
+
+local secFlash = pageVis:section({
+    name    = "Screen Flash",
+    side    = "left",
+    size    = 250,
+    pointer = "flash_sec",
+})
+
+secFlash:toggle({
+    name     = "Flash Enabled",
+    default  = true,
+    pointer  = "flashon",
+    callback = function(v) S.flashEnabled = v end,
+})
+
+secFlash:slider({
+    name     = "Flash Opacity",
+    min      = 0.05,
+    max      = 1,
+    default  = 0.55,
+    decimal  = 0.05,
+    pointer  = "flashopacity",
+    callback = function(v) S.flashOpacity = v end,
+})
+
+secFlash:slider({
+    name     = "Flash Fade Duration",
+    min      = 0.05,
+    max      = 2,
+    default  = 0.35,
+    decimal  = 0.05,
+    pointer  = "flashfade",
+    callback = function(v) S.flashDuration = v end,
+})
+
+secFlash:button({
+    name     = "Preview Flash",
+    callback = function() doFlash() end,
+})
+
+-- ────────────────────────────────────────────
+--  PAGE 3 — SOUNDS
+-- ────────────────────────────────────────────
+local pageSound = window:page({ name = "Sounds", pointer = "sounds" })
+
+local secSndL = pageSound:section({
+    name    = "Sound Toggles & Test",
+    side    = "left",
+    size    = 235,
+    pointer = "snd_l",
+})
+
+local secSndR = pageSound:section({
+    name    = "Volumes",
+    side    = "right",
+    size    = 215,
+    pointer = "snd_r",
+})
+
+secSndL:toggle({
+    name     = "Parry Sounds",
+    default  = true,
+    pointer  = "snd_parry",
+    callback = function(v) S.soundParry = v end,
+})
+
+secSndL:toggle({
+    name     = "Fall Sound",
+    default  = true,
+    pointer  = "snd_fall",
+    callback = function(v)
+        S.soundFall = v
+        if not v then snd_fall:Stop(); fallSoundActive = false end
+    end,
+})
+
+secSndL:toggle({
+    name     = "Land Sound",
+    default  = true,
+    pointer  = "snd_land",
+    callback = function(v) S.soundLand = v end,
+})
+
+secSndL:button({
+    name     = "▶ Test Parry 1",
+    callback = function() snd_parry1:Play() end,
+})
+
+secSndL:button({
+    name     = "▶ Test Parry 2",
+    callback = function() snd_parry2:Play() end,
+})
+
+secSndL:button({
+    name     = "▶ Test Fall (2s)",
+    callback = function()
+        snd_fall:Play()
+        task.delay(2, function() snd_fall:Stop() end)
+    end,
+})
+
+secSndL:button({
+    name     = "▶ Test Land",
+    callback = function() snd_land:Play() end,
+})
+
+secSndR:slider({
+    name     = "Parry Sound 1",
+    min      = 0, max = 1, default = 1.0, decimal = 0.05,
+    pointer  = "vol_p1",
+    callback = function(v) S.vol_parry1 = v end,
+})
+
+secSndR:slider({
+    name     = "Parry Sound 2",
+    min      = 0, max = 1, default = 0.8, decimal = 0.05,
+    pointer  = "vol_p2",
+    callback = function(v) S.vol_parry2 = v end,
+})
+
+secSndR:slider({
+    name     = "Fall Sound",
+    min      = 0, max = 1, default = 0.7, decimal = 0.05,
+    pointer  = "vol_fa",
+    callback = function(v) S.vol_fall = v end,
+})
+
+secSndR:slider({
+    name     = "Land Sound",
+    min      = 0, max = 1, default = 1.0, decimal = 0.05,
+    pointer  = "vol_la",
+    callback = function(v) S.vol_land = v end,
+})
+
+pageParry:openpage()
