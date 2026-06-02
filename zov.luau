@@ -207,6 +207,7 @@ function library:new(props)
 			BorderSizePixel = 1,
 			Size = UDim2.new(1,-10,1,-25),
 			Position = UDim2.new(0.5,0,1,-5),
+			ClipsDescendants = true,
 			Parent = outline2
 		}
 	)
@@ -285,6 +286,7 @@ function library:new(props)
 			BorderSizePixel = 1,
 			Size = UDim2.new(1,0,1,-20),
 			Position = UDim2.new(0.5,0,1,0),
+			ClipsDescendants = true,
 			Parent = holder
 		}
 	)
@@ -310,6 +312,7 @@ function library:new(props)
 			BorderSizePixel = 1,
 			Size = UDim2.new(1,0,1,0),
 			Position = UDim2.new(0,0,0,0),
+			ClipsDescendants = true,
 			Parent = tabs
 		}
 	)
@@ -970,6 +973,7 @@ function library:page(props)
 			Size = UDim2.new(1,-20,1,-20),
 			Position = UDim2.new(0.5,0,0.5,0),
 			Visible = false,
+			ClipsDescendants = true,
 			Parent = self.tabs
 		}
 	)
@@ -983,10 +987,10 @@ function library:page(props)
 			Position = UDim2.new(0,0,0,0),
 			AutomaticCanvasSize = "Y",
 			CanvasSize = UDim2.new(0,0,0,0),
-			ScrollBarImageTransparency = 1,
-			ScrollBarImageColor3 = Color3.fromRGB(0,0,0),
-			ScrollBarThickness = 0,
-			ClipsDescendants = false,
+			ScrollBarImageTransparency = 0.5,
+			ScrollBarImageColor3 = Color3.fromRGB(255,255,255),
+			ScrollBarThickness = 4,
+			ClipsDescendants = true,
 			VerticalScrollBarInset = "None",
 			VerticalScrollBarPosition = "Right",
 			Parent = pageholder
@@ -1012,10 +1016,10 @@ function library:page(props)
 			Position = UDim2.new(1,0,0,0),
 			AutomaticCanvasSize = "Y",
 			CanvasSize = UDim2.new(0,0,0,0),
-			ScrollBarImageTransparency = 1,
-			ScrollBarImageColor3 = Color3.fromRGB(0,0,0),
-			ScrollBarThickness = 0,
-			ClipsDescendants = false,
+			ScrollBarImageTransparency = 0.5,
+			ScrollBarImageColor3 = Color3.fromRGB(255,255,255),
+			ScrollBarThickness = 4,
+			ClipsDescendants = true,
 			VerticalScrollBarInset = "None",
 			VerticalScrollBarPosition = "Right",
 			Parent = pageholder
